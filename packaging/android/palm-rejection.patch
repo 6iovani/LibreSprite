@@ -1,0 +1,160 @@
+diff --git a/app/src/main/java/rocks/georgik/sdlapp/MainActivity.java b/app/src/main/java/rocks/georgik/sdlapp/MainActivity.java
+index 9069c21..cd30003 100644
+--- a/app/src/main/java/rocks/georgik/sdlapp/MainActivity.java
++++ b/app/src/main/java/rocks/georgik/sdlapp/MainActivity.java
+@@ -1456,6 +1456,14 @@ class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
+         float x, y;
+         int action;
+ 
++        if (isStylus(event, 0)) {
++            action = event.getActionMasked();
++            if (action == MotionEvent.ACTION_HOVER_ENTER || action == MotionEvent.ACTION_HOVER_MOVE)
++                stylusHover = true;
++            else if (action == MotionEvent.ACTION_HOVER_EXIT)
++                stylusHover = false;
++        }
++
+         switch ( event.getSource() ) {
+             case InputDevice.SOURCE_JOYSTICK:
+             case InputDevice.SOURCE_GAMEPAD:
+@@ -1517,10 +1525,81 @@ class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
+             return;
+         while (!touches.isEmpty()) {
+             Touch touch = touches.remove();
++            if (touch.action == MotionEvent.ACTION_DOWN) {
++                strokeId = touch.fingerId;
++                strokeStylus = false;
++            }
++            strokeX = touch.x;
++            strokeY = touch.y;
+             MainActivity.onNativeTouch(touch.deviceId, touch.fingerId, touch.action, touch.x, touch.y, touch.pressure);
+         }
+     }
+ 
++    // Only one pointer draws at a time (the stroke). Other contacts are ignored until it lifts.
++    int strokeId = -1;       // pointer ID of the stroke, -1 if there is no stroke
++    boolean strokeStylus;    // the stroke is from a stylus
++    float strokeX, strokeY;  // last position sent for the stroke
++    boolean stylusHover;     // a stylus is near the screen
++    boolean ignoreFingers;   // ignore fingers until a new first touch
++
++    static boolean isStylus(MotionEvent event, int i) {
++        int type = event.getToolType(i);
++        return type == MotionEvent.TOOL_TYPE_STYLUS || type == MotionEvent.TOOL_TYPE_ERASER;
++    }
++
++    // SDL moves the mouse only for pointer 0, so the stroke is always sent as pointer 0.
++    // An up event does not move the stroke, so it cannot draw a line.
++    void sendStroke(MotionEvent event, int i, int action) {
++        if (action != MotionEvent.ACTION_UP) {
++            strokeX = event.getX(i) / mWidth;
++            strokeY = event.getY(i) / mHeight;
++        }
++        MainActivity.onNativeTouch(event.getDeviceId(), 0, action, strokeX, strokeY, Math.min(1.0f, event.getPressure(i)));
++        strokeId = action == MotionEvent.ACTION_UP ? -1 : event.getPointerId(i);
++    }
++
++    // Stop the stroke, a touch not sent yet and the two finger drag, without drawing.
++    void endStroke(MotionEvent event) {
++        cancelTouch();
++        stopDrag(event);
++        if (strokeId != -1) {
++            MainActivity.onNativeTouch(event.getDeviceId(), 0, MotionEvent.ACTION_UP, strokeX, strokeY, 0);
++            strokeId = -1;
++        }
++    }
++
++    // Send only the stroke pointer.
++    void strokeTouch(MotionEvent event, int action) {
++        int i = event.findPointerIndex(strokeId);
++        if (action == MotionEvent.ACTION_CANCEL || i == -1) {
++            endStroke(event);
++            return;
++        }
++        if (action == MotionEvent.ACTION_MOVE) {
++            sendStroke(event, i, action);
++        } else if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) && event.getActionIndex() == i) {
++            sendStroke(event, i, MotionEvent.ACTION_UP);
++            if (action == MotionEvent.ACTION_POINTER_UP)
++                ignoreFingers = true;
++        }
++    }
++
++    // A stylus that touches or hovers has priority. It stops a finger stroke and fingers are ignored.
++    void stylusTouch(MotionEvent event, int action) {
++        ignoreFingers = true;
++        if (strokeId == -1 || !strokeStylus)
++            endStroke(event);
++        if (strokeId != -1) {
++            strokeTouch(event, action);
++            return;
++        }
++        int i = event.getActionIndex();
++        if ((action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) && isStylus(event, i)) {
++            strokeStylus = true;
++            sendStroke(event, i, MotionEvent.ACTION_DOWN);
++        }
++    }
++
+     boolean cancelTouch() {
+         if (touchHandler == null || beginTouchTime == 0)
+             return false;
+@@ -1613,6 +1692,29 @@ class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
+             return true;
+         }
+ 
++        boolean stylus = stylusHover;
++        for (i = 0; i < pointerCount; i++)
++            stylus |= isStylus(event, i);
++        i = -1;
++        if (stylus) {
++            stylusTouch(event, action);
++            return true;
++        }
++
++        if (action == MotionEvent.ACTION_DOWN) {
++            endStroke(event);  // an up event was lost
++            ignoreFingers = false;
++        }
++        if (ignoreFingers)
++            return true;
++        if (strokeId != -1) {
++            strokeTouch(event, action);
++            return true;
++        }
++
++        // Android cancels a palm touch with this flag (API 33)
++        boolean canceled = (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0;
++
+         switch(action) {
+             case MotionEvent.ACTION_MOVE:
+                 if (pointerCount == 1) {
+@@ -1638,6 +1740,10 @@ class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
+                 break;
+ 
+             case MotionEvent.ACTION_UP:
++                if (canceled) {
++                    endStroke(event);
++                    break;
++                }
+                 flushTouch();
+                 updateDrag(event);
+                 // Primary pointer up/down, the index is always zero
+@@ -1647,6 +1753,7 @@ class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
+                 y = event.getY(i) / mHeight;
+                 p = Math.min(1.0f, event.getPressure(i));
+                 MainActivity.onNativeTouch(touchDevId, pointerFingerId, action, x, y, p);
++                strokeId = -1;
+                 break;
+ 
+ 
+@@ -1656,8 +1763,7 @@ class SDLSurface extends SurfaceView implements SurfaceHolder.Callback,
+                 break;
+ 
+             case MotionEvent.ACTION_CANCEL:
+-                flushTouch();
+-                updateDrag(event);
++                endStroke(event);
+                 break;
+ 
+             default:

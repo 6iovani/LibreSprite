@@ -2,7 +2,7 @@ name: Android
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, palm-rejection ]
   pull_request:
     branches: [ master ]
 
@@ -44,7 +44,10 @@ jobs:
         ninja
         cd ..
     - name: Setup Submodule
-      run: git clone https://github.com/LibreSprite/ls-android-deps.git android
+      run: |
+        git clone https://github.com/LibreSprite/ls-android-deps.git android
+        # Lock each stroke to one pointer and give the stylus priority (palm rejection).
+        git -C android apply "$GITHUB_WORKSPACE/packaging/android/palm-rejection.patch"
     - name: Build Application
       run: |
         cd android
