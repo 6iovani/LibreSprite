@@ -52,36 +52,55 @@ jobs:
         CMAKEPATH=$(dirname $(dirname $(which cmake)))
         echo "cmake.dir=$CMAKEPATH" > local.properties
         sh ./gradlew --no-daemon --parallel build
+        
     - name: Sign release APK
-      env:
-        ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
-        ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
-        ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        ANDROID_KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
       run: |
-        # The gradle release build type is unsigned (ls-android-deps ships a
-        # placeholder signing config), so sign the release APK here with the
-        # shared release keystore (repo secrets) for a stable signature.
         cd android
-        echo "$ANDROID_KEYSTORE_B64" | base64 -d > libresprite-release.keystore
+
         BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
         APK=app/build/outputs/apk/all_in_one/release/app-all_in_one-release-unsigned.apk
+
         if [ ! -f "$APK" ]; then
-          echo "::error::release APK not found at $APK - listing what was built:"
+          echo "::error::Release APK not found at $APK"
           find app/build/outputs -type f 2>/dev/null | head -50
           exit 1
         fi
+
+        # Generate a temporary signing key for this build
+        KEYSTORE_PASS=$(openssl rand -hex 16)
+
+        keytool -genkeypair -noprompt \
+          -keystore libresprite-temp.keystore \
+          -storepass "$KEYSTORE_PASS" \
+          -keypass "$KEYSTORE_PASS" \
+          -alias libresprite \
+          -keyalg RSA \
+          -keysize 2048 \
+          -validity 10000 \
+          -dname "CN=LibreSprite Test, O=LibreSprite, C=US"
+
+        # Align the APK before signing
         "$BUILD_TOOLS/zipalign" -f 4 "$APK" "$APK.aligned"
         mv "$APK.aligned" "$APK"
+
+        # Sign the release APK
         "$BUILD_TOOLS/apksigner" sign \
-          --ks libresprite-release.keystore \
-          --ks-key-alias "$ANDROID_KEY_ALIAS" \
-          --ks-pass pass:"$ANDROID_KEYSTORE_PASS" \
-          --key-pass pass:"$ANDROID_KEY_PASS" \
+          --ks libresprite-temp.keystore \
+          --ks-key-alias libresprite \
+          --ks-pass "pass:$KEYSTORE_PASS" \
+          --key-pass "pass:$KEYSTORE_PASS" \
           "$APK"
+
+        # Verify the signature
         "$BUILD_TOOLS/apksigner" verify --print-certs "$APK"
+
+        # Rename to the final APK filename
         mv "$APK" app/build/outputs/apk/all_in_one/release/app-all_in_one-release.apk
-        rm libresprite-release.keystore
+
+        # Remove the temporary private key
+        rm -f libresprite-temp.keystore
+
+    
     - name: Archive production artifacts
       uses: actions/upload-artifact@v7
       with:
